@@ -15,6 +15,7 @@ from preprocess import get_transform
 from utils.log import setup_logging, ResultsLog, save_checkpoint
 from utils.meters import AverageMeter, accuracy
 from utils.optim import OptimRegime
+from utils.cross_entropy import CrossEntropyLoss
 from datetime import datetime
 from ast import literal_eval
 
@@ -59,6 +60,8 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)')
+parser.add_argument('--label_smoothing', default=0, type=float,
+                    help='weight decay (default: 1e-4)')
 parser.add_argument('--print-freq', '-p', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
@@ -67,6 +70,7 @@ parser.add_argument('-e', '--evaluate', type=str, metavar='FILE',
                     help='evaluate model FILE on validation set')
 parser.add_argument('--seed', default=123, type=int,
                     help='random seed (default: 123)')
+
 
 def main():
     global args, best_prec1
@@ -153,7 +157,11 @@ def main():
                                         'weight_decay': args.weight_decay}])
 
     # define loss function (criterion) and optimizer
-    criterion = getattr(model, 'criterion', nn.CrossEntropyLoss)()
+    criterion = getattr(model, 'criterion', None)
+    if hasattr(model, 'criterion'):
+        criterion = model.criterion
+    else:
+        criterion = CrossEntropyLoss(smooth_eps=args.label_smoothing)
     criterion.type(args.type)
     model.type(args.type)
 
@@ -237,20 +245,20 @@ def forward(data_loader, model, criterion, epoch=0, training=True, optimizer=Non
         data_time.update(time.time() - end)
         if args.gpus is not None:
             target = target.cuda(async=True)
-        input_var = Variable(inputs.type(args.type), volatile=not training)
-        target_var = Variable(target)
+        inputs = inputs.type(args.type)
 
         # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
+        output = model(inputs)
+        loss = criterion(output, target)
         if type(output) is list:
             output = output[0]
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], inputs.size(0))
-        top1.update(prec1[0], inputs.size(0))
-        top5.update(prec5[0], inputs.size(0))
+        prec1, prec5 = accuracy(output, target, topk=(1, 5))
+        batch_size = inputs.size(0)
+        losses.update(loss.item(), batch_size)
+        top1.update(prec1.item(), batch_size)
+        top5.update(prec5.item(), batch_size)
 
         if training:
             optimizer.update(epoch, epoch * len(data_loader) + i)
@@ -288,8 +296,9 @@ def train(data_loader, model, criterion, epoch, optimizer):
 def validate(data_loader, model, criterion, epoch):
     # switch to evaluate mode
     model.eval()
-    return forward(data_loader, model, criterion, epoch,
-                   training=False, optimizer=None)
+    with torch.no_grad():
+        return forward(data_loader, model, criterion, epoch,
+                       training=False, optimizer=None)
 
 
 if __name__ == '__main__':
